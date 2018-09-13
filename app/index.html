@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="">
+<head>
+    <meta charset="utf-8">
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>fileUpload</title>
+
+    <!-- build:css styles/upload.css -->
+    <link rel="stylesheet" href="styles/volcanoui.css">
+    <link rel="stylesheet" href="styles/main.css">
+    <!-- endbuild -->
+</head>
+<body>
+
+<div class="upload-wrap">
+    <div class="upload-header">
+        <div class="upload-container clearfix">
+            <div class="left-box">
+                文件上传
+            </div>
+
+            <ul id="tab" class="center-box">
+                <li class="page-title active" onclick="fileUploadChange('document', this)">
+                    文档
+                </li>
+                <li class="page-title" onclick="fileUploadChange('media', this)">
+                    音视频
+                </li>
+                <li class="page-title" onclick="fileUploadChange('file', this)">
+                    网盘
+                </li>
+            </ul>
+
+            <div class="right-box">
+                <div class="v-button primary upload-button">
+                    选择文件
+                    <input type="file" id="upload">
+                </div>
+                <div class="v-button primary upload-batch" title="按序列上传" onclick="batchUpload()">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="upload-container upload-main">
+
+        <div id="upload-info">
+        </div>
+
+        <div id="upload-view"></div>
+        <div id="no-file"></div>
+        <!--<div id="upload-log"></div>-->
+    </div>
+</div>
+<!-- build:js scripts/upload.js -->
+<script type="text/javascript" src="scripts/spark-md5.js"></script>
+<script src="scripts/main.js"></script>
+<!-- endbuild -->
+
+<script>
+    //上传状态
+    var UPLOAD_STATE_READY = 0,              //任务已添加
+        UPLOAD_STATE_READING = 1,            //文件读取中
+        UPLOAD_STATE_PROCESSING = 2,         //任务上传中
+        UPLOAD_STATE_COMPLETE = 3,           //任务上传完成
+        UPLOAD_STATE_FAST = 4,               //任务秒传
+
+        UPLOAD_STATE_SKIP = -1,              //任务已跳过
+        UPLOAD_STATE_CANCEL = -2,            //任务已取消
+        UPLOAD_STATE_ERROR = -3;             //任务已失败
+
+    var config = {
+        uid: '',                                                                               // uid
+        token: '',                                                                             // token
+        url: "",                                                                               // 上传URL
+        fastQueryUrl: "",                                                                      // 秒传查询URL
+        createTaskUrl: "",                                                                     // 创建上传任务URL
+        target: document.getElementById("upload"),                                              // 上传input
+        view: document.getElementById("upload-view"),                                           // 上传容器
+        allows: ".doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.ts",                                // 允许上传的文件类型（扩展名）,逗号分隔
+        isSliceSize: 30 * 1024 * 1024,                                                          // 超出该大小启用分片上传
+        chunkSize: 5 * 1024 * 1024,                                                             // 分片大小
+        isLog: true                                                                             // 是否开启日志
+//        logBox: document.getElementById('upload-log')                                         // 日志容器
+    }
+
+    var upload = new Uploader(config, {
+        // 上传成功callback
+        response: function (res) {
+            console.log(res)
+        },
+
+        // 创建上传UI
+        createUI: function (task) {
+            var self = this,
+                options = self.options,
+                boxView = options.view;
+
+            if (!boxView) {
+                return
+            }
+            var name = task.name;
+            var html =
+                '<div class="item-row clearfix">' +
+                '<div class="file-header">' +
+                '<div class="file-name">' + name + '</div>' +
+                '<div class="file-control">' +
+                '<div class="file-analysis"></div>' +
+                '<div class="file-state up-ready"></div>' +
+                '<div class="file-operate">' +
+                '<button class="v-button mini primary">上传</button>' +
+                '<button class="v-button mini">重传</button>' +
+                '<button class="v-button mini">取消</button>' +
+                '<button class="v-button mini">移除</button>' +
+                '</div>' +
+                '</div>' +
+                '</div>' +
+                '<div class="progress-box">' +
+                '<span class="progress-bar" style="width:0%;"></span>' +
+                '</div>' +
+                '<div class="upload-info">' +
+                '<div class="size"><span></span></div>' +
+                '<div class="progress"></div>' +
+                '<div class="speed">--/s</div>' +
+                '</div>' +
+                '</div>';
+
+            var taskId = task.id;
+            var box = document.createElement('div');
+            box.setAttribute('class', 'upload-item');
+            box.innerHTML = html;
+
+            box.taskId = taskId;
+            task.box = box;
+
+            //添加到视图中
+            boxView.appendChild(box);
+            //---------------- 事件绑定 ----------------
+            var itemRow = box.childNodes[0];
+            var fileHeader = itemRow.firstElementChild;
+            var fileControl = fileHeader.lastElementChild;
+            var fileOperate = fileControl.lastElementChild;
+            var buttonUpload = fileOperate.childNodes[0];
+            var buttonReUpload = fileOperate.childNodes[1];
+            var buttonCancel = fileOperate.childNodes[2];
+            var buttonRemove = fileOperate.childNodes[3];
+
+            //开始上传任务
+            buttonUpload.addEventListener('click', function () {
+                self.start(task);
+            });
+
+            //重新上传任务
+            buttonReUpload.addEventListener('click', function () {
+                self.reUpload(task);
+            });
+
+            //取消上传任务
+            buttonCancel.addEventListener('click', function () {
+                self.cancel(task);
+            });
+
+            //移除上传任务
+            buttonRemove.addEventListener('click', function () {
+                self.remove(task);
+                boxView.removeChild(box);
+            });
+        },
+
+        // 更新上传UI
+        updateUI: function (task) {
+            var self = this;
+            if (!task || !task.box) {
+                return
+            }
+            var total = task.total || task.size,
+                loaded = task.loaded,
+                state = task.state;
+
+
+            var box = task.box;
+            var itemRow = box.childNodes[0];
+            var fileHeader = itemRow.children[0];
+            var fileControl = fileHeader.lastElementChild;
+            var uploadInfo = itemRow.lastElementChild;
+
+            var sizeEle = uploadInfo.childNodes[0];
+            var progressEle = uploadInfo.childNodes[1];
+            var speedEle = uploadInfo.childNodes[2];
+
+            var progressBox = itemRow.childNodes[1];
+            var progressBar = progressBox.childNodes[0];
+            var analysisEle = fileControl.childNodes[0];
+            var stateEle = fileControl.childNodes[1];
+
+            if (task.pvg) {
+                if ((task.pvg * 100).toFixed(0) == 100) {
+                    analysisEle.innerHTML = '';
+                } else {
+                    analysisEle.innerHTML = '文件分析' + (task.pvg * 100).toFixed(0) + '%...';
+                }
+            }
+
+            //任务状态
+            if (task.queryOK && task.state == 2) {
+                stateEle.innerHTML = upload.uploadStatusTips(UPLOAD_STATE_FAST);
+            } else {
+                stateEle.innerHTML = upload.uploadStatusTips(state);
+            }
+
+            switch (state) {
+                case UPLOAD_STATE_READY:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-ready');
+                    break;
+                case UPLOAD_STATE_READING:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-progress');
+                    break;
+                case UPLOAD_STATE_PROCESSING:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-progress');
+                    break;
+                case UPLOAD_STATE_COMPLETE:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-complete');
+                    break;
+                case UPLOAD_STATE_FAST:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-complete');
+                    break;
+                case UPLOAD_STATE_ERROR:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-error');
+                    break;
+                case UPLOAD_STATE_CANCEL:
+                    stateEle.removeAttribute('class');
+                    stateEle.setAttribute('class', 'file-state up-cancel');
+                    break;
+                default:
+                    console.log('文件上传状态获取失败')
+            }
+
+            if (total < 0) {
+                return
+            }
+
+            var html_size = '';
+
+            //更新上传进度
+            if (this.html5 && loaded != undefined && loaded >= 0) {
+                var percentText;
+
+                if (state == UPLOAD_STATE_PROCESSING) {
+                    var percent = Math.min(loaded * 100 / total, 100);
+                    percentText = percent.toFixed(1);
+                    if (percentText == '100.0') {
+                        percentText = '99.9'
+                    }
+                } else if (state == UPLOAD_STATE_COMPLETE || state == UPLOAD_STATE_FAST) {
+                    percentText = '100';
+                }
+
+                //进度百分比
+                if (percentText) {
+                    percentText += '%';
+                    progressBar.style.width = percentText;
+                    progressEle.innerHTML = '( ' + percentText + ' )'
+                }
+
+                //已上传的文件大小
+                html_size = '<span>' + task.loadedFm + '</span> / ';
+
+                //上传速度;
+                var speed = task.avgSpeedFm || task.speedFm;
+                speedEle.innerHTML = speed + '/s';
+            }
+
+            //文件总大小
+            html_size += '<span>' + task.sizeFm + '</span>';
+            sizeEle.innerHTML = html_size;
+
+
+            var noFile = document.getElementById('no-file');
+            var taskList = self.list;
+            var files = 0;
+            for (var i = 0; i < taskList.length; i++) {
+                if (!taskList[i].deleted) {
+                    files++
+                }
+            }
+            if (files > 0) {
+                noFile.style.display = 'none';
+            } else {
+                noFile.style.display = 'block';
+            }
+        }
+    });
+</script>
+
+
+<script>
+
+    // 页面切换逻辑
+    var fileUploadChange = function (tag, self) {
+
+        function hasClass(elem, cls) {
+            cls = cls || '';
+            if (cls.replace(/\s/g, '').length == 0) return false;
+            return new RegExp(' ' + cls + ' ').test(' ' + elem.className + ' ');
+        }
+
+        function removeClass(elem, cls) {
+            if (hasClass(elem, cls)) {
+                var newClass = ' ' + elem.className.replace(/[\t\r\n]/g, '') + ' ';
+                while (newClass.indexOf(' ' + cls + ' ') >= 0) {
+                    newClass = newClass.replace(' ' + cls + ' ', ' ');
+                }
+                elem.className = newClass.replace(/^\s+|\s+$/g, '');
+            }
+        }
+
+        function siblings(elem) {
+            var nodes = [];
+            var previ = elem.previousSibling;
+            while (previ) {
+                if (previ.nodeType === 1) {
+                    nodes.push(previ);
+                }
+                previ = previ.previousSibling;
+            }
+            nodes.reverse();
+            var nexts = elem.nextSibling;
+            while (nexts) {
+                if (nexts.nodeType === 1) {
+                    nodes.push(nexts);
+                }
+                nexts = nexts.nextSibling;
+            }
+            return nodes;
+        }
+
+        upload.clearTask(function (state) {
+            if (state) {
+                document.getElementById('upload-view').innerHTML = '';
+                document.getElementById('no-file').style.display = 'block';
+
+                if (!hasClass(self, 'active')) {
+                    self.className = self.className == '' ? 'active' : self.className + ' ' + 'active';
+                }
+                var item = siblings(self);
+                for (var i = 0; i < item.length; i++) {
+                    removeClass(item[i], 'active')
+                }
+
+                if (tag == 'document') {
+                    var doc = '.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.ts';
+                    upload.setAllows(doc)
+                }
+
+                if (tag == 'media') {
+                    var media = '.mp4,.flv';
+                    upload.setAllows(media)
+                }
+
+                if (tag == 'file') {
+                    var file = '.jpg,.jpeg,.png,.gif,.bmp,.pdf,.zip,.ipa,.apk,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.ts';
+                    upload.setAllows(file)
+                }
+            }
+        })
+    }
+
+    var batchUpload = function () {
+        upload.startBatchTask()
+    }
+</script>
+
+</body>
+</html>
